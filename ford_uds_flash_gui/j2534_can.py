@@ -1,79 +1,27 @@
-import sys
-import time
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton,
-    QFileDialog, QTableWidget, QTableWidgetItem, QLabel
-)
-from PyQt5.QtCore import Qt
-from uds_core import UDSFlashSession
+from pyj2534 import J2534
+from pyj2534.defines import ProtocolID, BaudRate, ConnectFlags, FilterType
 
 
-class UDSFlasherGUI(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Ford UDS Flash Tool")
-        self.setGeometry(200, 200, 850, 500)
+class J2534IsoTPChannel:
+    def __init__(self, dll_path, can_tx=0x7E0, can_rx=0x7E8):
+        self.j = J2534(dll_path)
+        self.device = self.j.open()
+        self.channel = self.device.connect(
+            ProtocolID.CAN,
+            BaudRate.CAN_500K,
+            ConnectFlags.CAN_29BIT_ID
+        )
+        self.channel.start_msg_filter(FilterType.FLOW_CONTROL_FILTER, can_tx, can_rx)
+        self.can_tx = can_tx
+        self.can_rx = can_rx
 
-        self.layout = QVBoxLayout()
-        self.status = QLabel("Status: Idle")
-        self.status.setAlignment(Qt.AlignCenter)
+    def send_raw(self, payload: list):
+        msg = [self.can_tx >> 8, self.can_tx & 0xFF] + payload
+        msg += [0x55] * (8 - len(msg))  # pad to 8 bytes
+        self.channel.write(msg)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Time", "Dir", "Raw Data", "Decoded Info"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+    def read(self, timeout=0.5):
+        return self.channel.read(timeout=timeout)
 
-        self.load_btn = QPushButton("Load BIN File")
-        self.flash_btn = QPushButton("Start Flash")
-
-        self.layout.addWidget(self.status)
-        self.layout.addWidget(self.load_btn)
-        self.layout.addWidget(self.flash_btn)
-        self.layout.addWidget(self.table)
-        self.setLayout(self.layout)
-
-        self.session = None
-        self.bin_data = None
-
-        self.load_btn.clicked.connect(self.load_bin)
-        self.flash_btn.clicked.connect(self.flash_pcm)
-
-    def log(self, direction, data, info=""):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-
-        time_str = time.strftime("%H:%M:%S")
-        self.table.setItem(row, 0, QTableWidgetItem(time_str))
-        self.table.setItem(row, 1, QTableWidgetItem(direction))
-        self.table.setItem(row, 2, QTableWidgetItem(" ".join(f"{b:02X}" for b in data)))
-        self.table.setItem(row, 3, QTableWidgetItem(info))
-        self.table.scrollToBottom()
-
-    def load_bin(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open BIN file", "", "BIN Files (*.bin)")
-        if fname:
-            with open(fname, "rb") as f:
-                self.bin_data = f.read()
-            self.status.setText(f"Loaded: {fname} ({len(self.bin_data)} bytes)")
-
-    def flash_pcm(self):
-        if not self.bin_data:
-            self.status.setText("Please load a BIN file first.")
-            return
-
-        self.status.setText("Flashing in progress...")
-        self.session = UDSFlashSession(logger=self.log)
-
-        try:
-            self.session.run(self.bin_data)
-            self.status.setText("Flash completed successfully.")
-        except Exception as e:
-            self.status.setText(f"Error: {str(e)}")
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    gui = UDSFlasherGUI()
-    gui.show()
-    sys.exit(app.exec_())
+    def close(self):
+        self.device.close()
