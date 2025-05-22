@@ -1,47 +1,77 @@
-# uds_core.py
+from j2534_can import J2534IsoTPChannel
+from seedkey import solve_key
 
-class UdsCore:
-    def __init__(self):
-        self.state = "IDLE"
-        print("UDS Core Initialized")
+NEG_CODES = {
+    0x10: "General Reject",
+    0x11: "Service Not Supported",
+    0x12: "SubFunction Not Supported",
+    0x33: "Security Access Denied",
+    0x35: "Invalid Key",
+    0x36: "Exceeded Attempts",
+    0x78: "Response Pending",
+    0x22: "Conditions Not Correct",
+    0x31: "Request Out of Range",
+}
 
-    def diagnostic_session(self):
-        print("Requesting Diagnostic Session (0x10)...")
-        # TODO: Implement UDS 0x10 Diagnostic Session
-        self.state = "DIAGNOSTIC_SESSION_ACTIVE"
-        return True
 
-    def security_access(self):
-        print("Requesting Security Access (0x27)...")
-        # TODO: Implement UDS 0x27 Security Access (Seed/Key)
-        self.state = "SECURITY_ACCESS_GRANTED"
-        return True
+class UDSFlashSession:
+    def __init__(self, logger=print):
+        self.log = logger
+        self.channel = None
 
-    def request_download(self):
-        print("Requesting Download (0x34)...")
-        # TODO: Implement UDS 0x34 Request Download
-        self.state = "DOWNLOAD_REQUESTED"
-        return True
+    def decode_negative(self, resp):
+        if len(resp) >= 3 and resp[0] == 0x7F:
+            service = resp[1]
+            code = resp[2]
+            meaning = NEG_CODES.get(code, "Unknown Error")
+            return f"NEG: Service 0x{service:02X}, Code 0x{code:02X} → {meaning}"
+        return ""
 
-    def transfer_data(self, data_segment):
-        print(f"Transferring Data (0x36) segment: {data_segment[:10]}...") # Print first 10 bytes for brevity
-        # TODO: Implement UDS 0x36 Transfer Data
-        # TODO: Implement ISO-TP segmentation for >7 byte messages
-        self.state = "DATA_TRANSFERRING"
-        return True
+    def log_rx(self, resp):
+        decoded = self.decode_negative(resp)
+        self.log("RX", resp, decoded)
 
-    def request_transfer_exit(self):
-        print("Requesting Transfer Exit (0x37)...")
-        # TODO: Implement UDS 0x37 Request Transfer Exit
-        self.state = "TRANSFER_COMPLETE"
-        return True
+    def run(self, bin_data):
+        self.channel = J2534IsoTPChannel(
+            dll_path=r"C:\Program Files (x86)\OpenECU\J2534\op20pt32.dll"
+        )
 
-    def get_current_state(self):
-        return self.state
+        def send(data):
+            self.log("TX", data)
+            self.channel.send_raw(data)
 
-if __name__ == '__main__':
-    core = UdsCore()
-    print(f"Initial state: {core.get_current_state()}")
-    core.diagnostic_session()
-    print(f"State after diagnostic session: {core.get_current_state()}")
-    # Further example usage can be added here
+        def recv():
+            msgs = self.channel.read()
+            for msg in msgs:
+                data = msg.Data
+                self.log_rx(data)
+                return data
+            self.log("RX", [], "No response")
+            return []
+
+        try:
+            send([0x10, 0x03])  # Extended diagnostic session
+            recv()
+
+            send([0x27, 0x01])  # Request seed
+            resp = recv()
+            seed = resp[2:] if len(resp) > 2 else b'\x00\x00\x00\x00'
+            key = solve_key(bytes(seed))
+
+            send([0x27, 0x02] + list(key))  # Send key
+            recv()
+
+            addr = 0x00800000
+            size = min(len(bin_data), 0xF0)  # For now, only flash 0xF0 bytes
+
+            send([0x34, 0x00, 0x44] + list(addr.to_bytes(4, 'big')) + list(size.to_bytes(4, 'big')))
+            recv()
+
+            send([0x36, 0x01] + list(bin_data[:size]))
+            recv()
+
+            send([0x37])  # Request transfer exit
+            recv()
+
+        finally:
+            self.channel.close()
