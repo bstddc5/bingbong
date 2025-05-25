@@ -13,10 +13,10 @@ NEG_CODES = {
     0x31: "Request Out of Range",
 }
 
-
 class UDSFlashSession:
-    def __init__(self, logger=print):
+    def __init__(self, logger=print, dll_path=None):
         self.log = logger
+        self.dll_path = dll_path or r"C:\Program Files (x86)\OpenECU\J2534\op20pt32.dll"
         self.channel = None
 
     def decode_negative(self, resp):
@@ -32,9 +32,7 @@ class UDSFlashSession:
         self.log("RX", resp, decoded)
 
     def run(self, bin_data):
-        self.channel = J2534IsoTPChannel(
-            dll_path=r"C:\Program Files (x86)\OpenECU\J2534\op20pt32.dll"
-        )
+        self.channel = J2534IsoTPChannel(dll_path=self.dll_path)
 
         def send(data):
             self.log("TX", data)
@@ -50,19 +48,19 @@ class UDSFlashSession:
             return []
 
         try:
-            send([0x10, 0x03])  # Extended diagnostic session
+            send([0x10, 0x03])
             recv()
 
-            send([0x27, 0x01])  # Request seed
+            send([0x27, 0x01])
             resp = recv()
             seed = resp[2:] if len(resp) > 2 else b'\x00\x00\x00\x00'
             key = solve_key(bytes(seed))
 
-            send([0x27, 0x02] + list(key))  # Send key
+            send([0x27, 0x02] + list(key))
             recv()
 
             addr = 0x00800000
-            size = min(len(bin_data), 0xF0)  # For now, only flash 0xF0 bytes
+            size = min(len(bin_data), 0xF0)
 
             send([0x34, 0x00, 0x44] + list(addr.to_bytes(4, 'big')) + list(size.to_bytes(4, 'big')))
             recv()
@@ -70,8 +68,16 @@ class UDSFlashSession:
             send([0x36, 0x01] + list(bin_data[:size]))
             recv()
 
-            send([0x37])  # Request transfer exit
+            send([0x37])
             recv()
 
         finally:
             self.channel.close()
+
+    def test_session(self):
+        self.channel = J2534IsoTPChannel(dll_path=self.dll_path)
+        self.channel.send_raw([0x10, 0x03])
+        resp = self.channel.read()
+        for msg in resp:
+            self.log("RX", msg.Data, "Test session response")
+        self.channel.close()
